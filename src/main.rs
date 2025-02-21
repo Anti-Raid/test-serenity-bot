@@ -1,5 +1,5 @@
 use log::info;
-use serenity::all::{Framework, HttpBuilder};
+use serenity::all::{Framework, GuildId, HttpBuilder};
 use serenity::async_trait;
 use serenity::prelude::*;
 use std::io::Write;
@@ -28,6 +28,11 @@ impl Framework for Handler {
                     }
                 });
             }
+        } else if let serenity::all::FullEvent::Message { new_message, .. } = event {
+            println!(
+                "Message from {}: {}",
+                new_message.author.name, new_message.content
+            );
         }
     }
 }
@@ -40,6 +45,7 @@ async fn main() {
     struct Config {
         pub token: String,
         pub proxy_url: String,
+        pub guild_ids: Vec<GuildId>,
     }
 
     let config: Config = serde_json::from_reader(config_file).expect("Failed to parse config file");
@@ -63,7 +69,7 @@ async fn main() {
     let token: serenity::all::Token = config.token.parse().expect("Invalid token");
     let http = Arc::new(
         HttpBuilder::new(token.clone())
-            .proxy(config.proxy_url)
+            .proxy(config.proxy_url.clone())
             .ratelimiter_disabled(true)
             .build(),
     );
@@ -83,11 +89,41 @@ async fn main() {
         .await
         .expect("Error creating client");
 
-    // Finally, start a single shard, and start listening to events.
-    //
-    // Shards will automatically attempt to reconnect, and will perform exponential backoff until
-    // it reconnects.
-    if let Err(why) = client.start_autosharded().await {
-        println!("Client error: {why:?}");
+    if !config.guild_ids.is_empty() {
+        // Fetch /api/gateway/bot?guild_ids=... to get the shard count
+        let req = reqwest::Client::new()
+            .get(format!(
+                "{}/api/gateway/bot?guild_ids={}",
+                config.proxy_url,
+                config
+                    .guild_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+            .send()
+            .await
+            .expect("Failed to fetch gateway info")
+            .json::<serenity::all::BotGateway>()
+            .await
+            .expect("Failed to parse gateway info");
+
+        println!("WS URL: {}", req.url);
+        client.ws_url = Arc::from(req.url.to_string());
+        client.shard_manager.ws_url = Arc::from(req.url.to_string());
+
+        client
+            .start_shards(req.shards.into())
+            .await
+            .expect("Failed to start shards");
+    } else {
+        // Finally, start a shard, and start listening to events.
+        //
+        // Shards will automatically attempt to reconnect, and will perform exponential backoff until
+        // it reconnects.
+        if let Err(why) = client.start_autosharded().await {
+            println!("Client error: {why:?}");
+        }
     }
 }
